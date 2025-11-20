@@ -47,6 +47,9 @@ class AgentNode(Node):
 
         self.pub_act = self.create_publisher(Float32MultiArray, '/agent/cmd', 10)
         
+        # Debug publisher for stacked images
+        self.pub_debug_stack = self.create_publisher(Image, '/debug/stacked_image', 10)
+        
         share_dir = get_package_share_directory('model_in_ros2node_pkg')
         model_path = os.path.join(share_dir, 'models',  self.MODEL_FILE_NAME)
 
@@ -120,6 +123,28 @@ class AgentNode(Node):
         # 注意: NHWCの場合はチャンネル結合の仕方が異なるため、一度NHWCにしてから結合
         # ここでは簡易的にNCHWを転置して作成
         img_nhwc = np.transpose(img_nchw, (0, 2, 3, 1))
+
+        # Debug: Publish stacked image visualization
+        if self.debug:
+            try:
+                # frame_buffer contains (3, H, W) arrays
+                # Convert to (H, W, 3) for each frame and concatenate horizontally
+                frames_vis = []
+                for f in self.frame_buffer:
+                    # (3, H, W) -> (H, W, 3)
+                    f_hwc = np.transpose(f, (1, 2, 0))
+                    # [0,1] float -> [0,255] uint8
+                    f_uint8 = (f_hwc * 255.0).astype(np.uint8)
+                    frames_vis.append(f_uint8)
+                
+                # Concatenate horizontally: (H, W*Stack, 3)
+                stacked_vis = np.concatenate(frames_vis, axis=1)
+                
+                # Publish
+                debug_msg = self.bridge.cv2_to_imgmsg(stacked_vis, encoding='rgb8')
+                self.pub_debug_stack.publish(debug_msg)
+            except Exception as e:
+                self.get_logger().warn(f"Failed to publish debug image: {e}")
 
         # ベクトル観測
         # 優先: Unity から送られるベクトル（距離・角度など）
