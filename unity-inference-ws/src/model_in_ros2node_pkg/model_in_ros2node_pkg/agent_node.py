@@ -9,19 +9,24 @@ from cv_bridge import CvBridge
 import cv2
 from ament_index_python.packages import get_package_share_directory
 import os
+from collections import deque
 
 class AgentNode(Node):
     # Constants
     IMG_WIDTH = 112
     IMG_HEIGHT = 84
     VEC_OBS_DIM = 2  # [distance, angle]
-    MODEL_FILE_NAME = '1stack.onnx'
+    MODEL_FILE_NAME = 'balance.onnx'
+    STACK_SIZE = 5   # Number of image frames to stack
 
     def __init__(self):
         super().__init__('agent_node')
 
         self.bridge = CvBridge()
         self.goal = np.zeros(2)  # x,z
+        
+        # Frame buffer for stacking
+        self.frame_buffer = deque(maxlen=self.STACK_SIZE)
 
         # Debug/monitor parameters
         self.declare_parameter('debug', True)
@@ -37,7 +42,7 @@ class AgentNode(Node):
         # self.sub_goal = self.create_subscription(Point, '/agent/goal', self.cb_goal, 10)
 
         # Optional: vector observations directly from Unity (2 floats expected)
-        self.vec_obs = None  # shape (1,7) or None
+        self.vec_obs = None
         self.sub_vec = self.create_subscription(Float32MultiArray, '/agent/vector_obs', self.cb_vec, 10)
 
         self.pub_act = self.create_publisher(Float32MultiArray, '/agent/cmd', 10)
@@ -94,9 +99,27 @@ class AgentNode(Node):
         img_f = img_rgb.astype(np.float32) / 255.0             # (H,W,3)
 
         # 画像テンソル（NCHW / NHWC の両方を用意）
-        img_nchw = np.transpose(img_f, (2, 0, 1))              # (3,H,W)
-        img_nchw = np.expand_dims(img_nchw, axis=0)            # (1,3,H,W)
-        img_nhwc = np.expand_dims(img_f, axis=0)               # (1,H,W,3)
+        # 単フレーム: (3,H,W)
+        img_chw = np.transpose(img_f, (2, 0, 1))
+        
+        # バッファに追加
+        if len(self.frame_buffer) == 0:
+            # 初回は同じフレームで埋める
+            for _ in range(self.STACK_SIZE):
+                self.frame_buffer.append(img_chw)
+        else:
+            self.frame_buffer.append(img_chw)
+            
+        # スタック作成 (STACK_SIZE * 3, H, W) -> 例: (15, 84, 112)
+        stacked_chw = np.concatenate(list(self.frame_buffer), axis=0)
+        
+        # バッチ次元追加
+        img_nchw = np.expand_dims(stacked_chw, axis=0)         # (1, C*Stack, H, W)
+        
+        # NHWC用も作成 (H, W, C*Stack) -> (1, H, W, C*Stack)
+        # 注意: NHWCの場合はチャンネル結合の仕方が異なるため、一度NHWCにしてから結合
+        # ここでは簡易的にNCHWを転置して作成
+        img_nhwc = np.transpose(img_nchw, (0, 2, 3, 1))
 
         # ベクトル観測
         # 優先: Unity から送られるベクトル（距離・角度など）
@@ -111,9 +134,12 @@ class AgentNode(Node):
         for name, shape in zip(self.input_names, self.input_shapes):
             # shape が [None, ...] のように可変でも次元数で判定
             if len(shape) == 4:
-                # NCHW 期待: shape[1] が 1 or 3 のことが多い / それ以外は NHWC とみなす
-                ch = shape[1]
-                if isinstance(ch, int) and ch in (1, 3):
+                # NCHW 期待: shape[1] が チャンネル数 (3 or 15 etc)
+                # NHWC 期待: shape[3] が チャンネル数
+                
+                # 簡易判定: shape[1] がチャンネル数っぽい場合 (NCHW)
+                ch_dim1 = shape[1]
+                if isinstance(ch_dim1, int) and (ch_dim1 == 3 or ch_dim1 == 3 * self.STACK_SIZE):
                     feed[name] = img_nchw
                 else:
                     feed[name] = img_nhwc
@@ -129,6 +155,7 @@ class AgentNode(Node):
                 feed[name] = v
 
         try:
+            # onnxruntime で推論実行
             outputs_list = self.session.run(None, feed)
             name_to_out = {name: np.array(val) for name, val in zip(self.output_names, outputs_list)}
 
