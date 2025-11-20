@@ -1,2 +1,0 @@
-[console_scripts]
-agent_node = model_in_ros2node_pkg.agent_node:main

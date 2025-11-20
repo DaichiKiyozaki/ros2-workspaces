@@ -1,0 +1,9 @@
+source;share/model_in_ros2node_pkg/hook/pythonpath.ps1
+source;share/model_in_ros2node_pkg/hook/pythonpath.dsv
+source;share/model_in_ros2node_pkg/hook/pythonpath.sh
+source;share/model_in_ros2node_pkg/hook/ament_prefix_path.ps1
+source;share/model_in_ros2node_pkg/hook/ament_prefix_path.dsv
+source;share/model_in_ros2node_pkg/hook/ament_prefix_path.sh
+source;../../build/model_in_ros2node_pkg/share/model_in_ros2node_pkg/hook/pythonpath_develop.ps1
+source;../../build/model_in_ros2node_pkg/share/model_in_ros2node_pkg/hook/pythonpath_develop.dsv
+source;../../build/model_in_ros2node_pkg/share/model_in_ros2node_pkg/hook/pythonpath_develop.sh
