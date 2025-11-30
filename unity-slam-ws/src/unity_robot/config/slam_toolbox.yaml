@@ -1,0 +1,17 @@
+slam_toolbox:
+  ros__parameters:
+    # フレーム設定
+    odom_frame: odom
+    base_frame: base_link
+    map_frame: map
+
+    # LiDAR トピック
+    scan_topic: /scan
+
+    # 基本設定
+    use_sim_time: true        # Unity 側から /clock を出しているなら true
+    mode: "mapping"           # 地図作成モード
+
+    # そのほかデフォルトのままでも動きますが、必要に応じて調整
+    max_laser_range: 20.0
+    minimum_time_interval: 0.1
