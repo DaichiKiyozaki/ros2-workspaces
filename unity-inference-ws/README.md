@@ -10,13 +10,21 @@ Unity上のエージェントをROS 2ノードで推論・制御するための�
 
 ## セットアップ
 
-1. ワークスペースのビルド
+1. 環境地図とrvizの設定ファイルを追加
+   - 環境地図
+      - 配置先： `unity-inference-ws/src/model_in_ros2node_pkg/map`
+      - .yamlと.pgmのセット
+      - 推論環境の地図をlaunch呼び出し時に指定、またはlaunchファイルのデフォルト値を書き換え
+   - rviz設定ファイル
+      - 配置先： `unity-inference-ws/src/model_in_ros2node_pkg/rviz`
+
+2. ワークスペースのビルド
    ```bash
    cd ~/ros_pj/unity-inference-ws
    colcon build --symlink-install
    ```
 
-2. オーバーレイ
+3. オーバーレイ
    ```bash
    source install/setup.bash
    ```
