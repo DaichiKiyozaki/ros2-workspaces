@@ -5,8 +5,8 @@ Unity上のエージェントをROS 2ノードで推論・制御するための�
 `ros2-for-unity` を使用してUnityとROS 2間で通信を行い、ROS 2ノード上でONNXモデルを用いた推論を実行します。
 
 ## 開発環境
-- Ros2 jazzy
-- python 3.12
+- ROS2 jazzy
+- Python 3.12
 
 ## セットアップ
 
