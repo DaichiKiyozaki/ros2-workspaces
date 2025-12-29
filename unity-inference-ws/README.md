@@ -78,4 +78,4 @@ Unity側では `ros2-for-unity` を使用して、以下のデータをPublish�
 ## ディレクトリ構造
 - `src/model_in_ros2node_pkg`: 推論ノードのパッケージ
   - `model_in_ros2node_pkg/agent_node.py`: 推論ロジックのメインスクリプト
-- `2seg_pkg/share/models/`: ONNXモデルファイルの配置先
+
