@@ -19,6 +19,8 @@
 **/build/*
 **/install/*
 **/log/*
+**/map/*
+**/rviz/*
 
 # for Python
 __pycache__/

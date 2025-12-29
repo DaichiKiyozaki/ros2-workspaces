@@ -1,8 +1,9 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -78,13 +79,17 @@ def generate_launch_description():
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument(
                 "map",
-                default_value="/home/daichi-kiyozaki/ros_pj/unity-inference-ws/src/map/unity_map.yaml",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("model_in_ros2node_pkg"), "map", "my_map.yaml"]
+                ),
                 description="Map YAML file for nav2_map_server",
             ),
             DeclareLaunchArgument("rviz", default_value="true"),
             DeclareLaunchArgument(
                 "rviz_config",
-                default_value="",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("model_in_ros2node_pkg"), "rviz", "unity_ros_inf_only_sensors.rviz"]
+                ), # rviz設定ファイルのパス
                 description="RViz config file path. If empty, RViz opens with default config.",
             ),
             DeclareLaunchArgument("global_frame_id", default_value="map"),
