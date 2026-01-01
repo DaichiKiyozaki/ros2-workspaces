@@ -19,6 +19,7 @@
 **/build/*
 **/install/*
 **/log/*
+**/map/*
 
 # for Python
 __pycache__/
