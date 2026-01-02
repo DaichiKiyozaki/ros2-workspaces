@@ -25,7 +25,7 @@ from cv_bridge import CvBridge
 # ---- パス設定 ----
 PKG_NAME = "ped_orient_pkg"
 PKG_DIR = Path(__file__).resolve().parent
-
+# パッケージ共有フォルダ取得。インストール時はshare、開発時はパッケージ直下を利用
 try:
     SHARE_DIR = get_package_share_path(PKG_NAME)
 except Exception:
@@ -37,7 +37,7 @@ _yolo_weights_candidate = SHARE_DIR / "yolov8n-seg.pt"
 MEBOW_ROOT = _mebow_root_candidate if _mebow_root_candidate.exists() else PKG_DIR / "MEBOW"
 YOLO_WEIGHTS = _yolo_weights_candidate if _yolo_weights_candidate.exists() else PKG_DIR / "yolov8n-seg.pt"
 MEBOW_LIB_PATH = MEBOW_ROOT / "lib"
-
+# MEBOWのlibをimport可能にする
 if str(MEBOW_LIB_PATH) not in sys.path:
     sys.path.insert(0, str(MEBOW_LIB_PATH))
 
@@ -46,6 +46,7 @@ try:
     from config import update_config as mebow_update_config
     import models as mebow_models
 except ImportError as e:  # pragma: no cover - インポート時のガード
+    # MEBOWの配置ミス時は明示的に失敗させる
     raise ImportError(
         f"MEBOWモジュールのインポートに失敗しました ({MEBOW_LIB_PATH})。"
         "パッケージ内にMEBOWディレクトリが存在することを確認してください。"
@@ -60,7 +61,10 @@ mebow_transform = transforms.Compose([transforms.ToTensor(), normalize])
 
 
 def quantize_angle(angle_deg: float) -> str:
-    """連続的な角度を2方向に量子化"""
+    """連続的な角度を2方向に量子化
+    - 45°〜225°をfront（赤）扱い
+    - それ以外をback（青）扱い
+    """
     if 45 <= angle_deg < 225:
         return "front"
     else:
@@ -71,7 +75,7 @@ class PedOrientNode(Node):
     def __init__(self):
         super().__init__("ped_orient_node")
         self.bridge = CvBridge()
-        self.processing = False
+        self.processing = False  # 単純な排他制御（フレーム落ち防止）
 
         # パラメータ設定: 入力トピックのみ。出力とサイズはシンプルさのため固定
         self.declare_parameter("input_image_topic", "/img")
@@ -83,13 +87,14 @@ class PedOrientNode(Node):
         self.confidence = 0.7
 
         self.get_logger().info(f"Using device: {DEVICE}")
+        # MEBOWモデルのロード（HRNetベース）。入力サイズは設定から取得
         self.mebow_model = self._load_mebow()
         width, height = mebow_cfg.MODEL.IMAGE_SIZE
-        self.mebow_input_size = (int(width), int(height))  # cv2.resize expects (w, h)
-
+        self.mebow_input_size = (int(width), int(height))  # cv2.resizeは(w,h)
+        # YOLOv8セグメンテーションモデルのロード（人物クラスのみ利用）
         self.seg_model = YOLO(str(YOLO_WEIGHTS)).to(DEVICE)
         if DEVICE == "cuda":
-            self.seg_model = self.seg_model.half()
+            self.seg_model = self.seg_model.half()  # GPU時は半精度で高速化
 
         # ROSインターフェース
         self.sub_img = self.create_subscription(Image, self.input_topic, self.on_image, qos_profile_sensor_data)
@@ -100,19 +105,21 @@ class PedOrientNode(Node):
         )
 
     def _load_mebow(self):
+        # MEBOW設定と重みの適用
         cfg_path = MEBOW_ROOT / "experiments/coco/segm-4_lr1e-3.yaml"
         model_path = MEBOW_ROOT / "models/model_hboe.pth"
         args = SimpleNamespace(cfg=str(cfg_path), opts=[], modelDir="", logDir="", dataDir="")
-        mebow_update_config(mebow_cfg, args)
+        mebow_update_config(mebow_cfg, args)  # YAMLの読み込みとcfgへの反映
         model = mebow_models.pose_hrnet.get_pose_net(mebow_cfg, is_train=False)
         if not model_path.exists():
             raise FileNotFoundError(f"MEBOW model not found at {model_path}")
         self.get_logger().info(f"Loading MEBOW weights: {model_path}")
         state = torch.load(model_path, map_location=DEVICE)
-        model.load_state_dict(state, strict=False)
+        model.load_state_dict(state, strict=False)  # 互換性のためstrict=False
         return model.to(DEVICE).eval()
 
     def on_image(self, msg: Image):
+        # 画像1枚に対する推論パイプライン
         if self.processing:
             return
         self.processing = True
@@ -121,6 +128,7 @@ class PedOrientNode(Node):
             h, w = frame.shape[:2]
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+            # 1) YOLOで人物セグメンテーション取得（マスク+バウンディングボックス）
             try:
                 with torch.inference_mode():
                     seg_res = self.seg_model.predict(
@@ -129,18 +137,17 @@ class PedOrientNode(Node):
             except Exception as e:
                 self.get_logger().error(f"YOLO推論に失敗: {e}")
                 return
-
             if seg_res.boxes is None or seg_res.masks is None:
                 return
-
             b_seg = seg_res.boxes.xyxy.cpu().numpy()
             masks = (seg_res.masks.data > 0.5).cpu().numpy().astype(np.uint8)
             if masks.size == 0:
                 return
 
-            # 完全セグメンテーション画像を作成（人以外の領域はシアン）
+            # 2) 出力画像（背景はシアン）を初期化
             segmentation = np.full_like(frame, BACKGROUND_COLOR)
 
+            # 3) 各人物領域をMEBOW入力サイズへリサイズ→バッチ推論
             person_inputs = []
             valid_masks = []
             valid_boxes = []
@@ -161,25 +168,26 @@ class PedOrientNode(Node):
 
             batch_input_tensor = torch.stack(person_inputs).to(DEVICE)
             with torch.no_grad():
-                _, batch_hoe_output = self.mebow_model(batch_input_tensor)
+                _, batch_hoe_output = self.mebow_model(batch_input_tensor)  # HRNet出力(2D) + 方向分類(72bin)
 
+            # 4) 方向をfront/backへ量子化し、マスク領域へ着色
             for i, hoe_output in enumerate(batch_hoe_output):
                 x1, y1, x2, y2 = valid_boxes[i]
                 mask_pred = valid_masks[i]
 
-                pred_idx = torch.argmax(hoe_output)
+                pred_idx = torch.argmax(hoe_output)  # 5°刻みのbin
                 angle_pred = pred_idx.item() * 5
-                direction = quantize_angle(angle_pred)
+                direction = quantize_angle(angle_pred)  # front/backへ簡易マッピング
                 if self.invert_orientation:
                     direction = "front" if direction == "back" else "back"
                 col = COLOR[direction]
 
-                # セグメンテーション画像に色を塗る（透過なし）
+                # マスク解像度を元画像へ合わせて塗りつぶし
                 if mask_pred.shape[:2] != (h, w):
                     mask_pred = cv2.resize(mask_pred, (w, h), interpolation=cv2.INTER_NEAREST)
                 segmentation[mask_pred == 1] = col
 
-            # ダウンサイズして配信
+            # 5) 希望サイズへダウンスケールし、BGR8でpublish
             try:
                 resized = cv2.resize(segmentation, self.target_size, interpolation=cv2.INTER_AREA)
                 msg_seg = self.bridge.cv2_to_imgmsg(resized, encoding="bgr8")
