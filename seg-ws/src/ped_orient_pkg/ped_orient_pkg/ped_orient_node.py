@@ -11,8 +11,10 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 import torch
-from ultralytics import YOLO
 import torchvision.transforms as transforms
+from ultralytics import YOLO
+
+from ament_index_python.packages import get_package_share_path
 
 import rclpy
 from rclpy.node import Node
@@ -21,10 +23,20 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
 # ---- パス設定 ----
+PKG_NAME = "ped_orient_pkg"
 PKG_DIR = Path(__file__).resolve().parent
-MEBOW_ROOT = PKG_DIR / "MEBOW"
+
+try:
+    SHARE_DIR = get_package_share_path(PKG_NAME)
+except Exception:
+    SHARE_DIR = PKG_DIR  # インストール不備時のフォールバック
+
+_mebow_root_candidate = SHARE_DIR / "MEBOW"
+_yolo_weights_candidate = SHARE_DIR / "yolov8n-seg.pt"
+
+MEBOW_ROOT = _mebow_root_candidate if _mebow_root_candidate.exists() else PKG_DIR / "MEBOW"
+YOLO_WEIGHTS = _yolo_weights_candidate if _yolo_weights_candidate.exists() else PKG_DIR / "yolov8n-seg.pt"
 MEBOW_LIB_PATH = MEBOW_ROOT / "lib"
-YOLO_WEIGHTS = PKG_DIR / "yolov8n-seg.pt"
 
 if str(MEBOW_LIB_PATH) not in sys.path:
     sys.path.insert(0, str(MEBOW_LIB_PATH))
@@ -40,7 +52,6 @@ except ImportError as e:  # pragma: no cover - インポート時のガード
     ) from e
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DIR2 = ["front", "back"]
 COLOR = {"front": (0, 0, 255), "back": (255, 0, 0)}  # front: red (BGR), back: blue (BGR)
 BACKGROUND_COLOR = (255, 255, 0)  # cyan (BGR) for non-person regions - RGB: (0, 255, 255)
 
@@ -64,19 +75,21 @@ class PedOrientNode(Node):
 
         # パラメータ設定: 入力トピックのみ。出力とサイズはシンプルさのため固定
         self.declare_parameter("input_image_topic", "/img")
+        self.declare_parameter("invert_orientation", False)
         self.input_topic = str(self.get_parameter("input_image_topic").value)
+        self.invert_orientation = bool(self.get_parameter("invert_orientation").value)
         self.output_topic = "/ped_orient/segmentation"
         self.target_size = (112, 84)
         self.confidence = 0.7
 
         self.get_logger().info(f"Using device: {DEVICE}")
         self.mebow_model = self._load_mebow()
-        self.mebow_input_size = (192, 256)
+        width, height = mebow_cfg.MODEL.IMAGE_SIZE
+        self.mebow_input_size = (int(width), int(height))  # cv2.resize expects (w, h)
 
         self.seg_model = YOLO(str(YOLO_WEIGHTS)).to(DEVICE)
         if DEVICE == "cuda":
             self.seg_model = self.seg_model.half()
-            torch.cuda.Stream()  # ウォームアップ
 
         # ROSインターフェース
         self.sub_img = self.create_subscription(Image, self.input_topic, self.on_image, qos_profile_sensor_data)
@@ -105,83 +118,79 @@ class PedOrientNode(Node):
         self.processing = True
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except Exception as e:  # pragma: no cover - 実行時のガード
-            self.get_logger().error(f"画像変換に失敗: {e}")
-            self.processing = False
-            return
+            h, w = frame.shape[:2]
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        h, w = frame.shape[:2]
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            try:
+                with torch.inference_mode():
+                    seg_res = self.seg_model.predict(
+                        frame, imgsz=640, conf=self.confidence, classes=[0], retina_masks=True, stream=False
+                    )[0]
+            except Exception as e:
+                self.get_logger().error(f"YOLO推論に失敗: {e}")
+                return
 
-        try:
-            with torch.inference_mode():
-                seg_res = self.seg_model.predict(
-                    frame, imgsz=640, conf=self.confidence, classes=[0], stream=False
-                )[0]
+            if seg_res.boxes is None or seg_res.masks is None:
+                return
+
+            b_seg = seg_res.boxes.xyxy.cpu().numpy()
+            masks = (seg_res.masks.data > 0.5).cpu().numpy().astype(np.uint8)
+            if masks.size == 0:
+                return
+
+            # 完全セグメンテーション画像を作成（人以外の領域はシアン）
+            segmentation = np.full_like(frame, BACKGROUND_COLOR)
+
+            person_inputs = []
+            valid_masks = []
+            valid_boxes = []
+            for bs, mask_pred in zip(b_seg, masks):
+                x1, y1, x2, y2 = map(int, bs)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                if x1 >= x2 or y1 >= y2:
+                    continue
+                person_img = frame_rgb[y1:y2, x1:x2]
+                person_img_resized = cv2.resize(person_img, self.mebow_input_size, interpolation=cv2.INTER_LINEAR)
+                person_inputs.append(mebow_transform(person_img_resized))
+                valid_masks.append(mask_pred)
+                valid_boxes.append((x1, y1, x2, y2))
+
+            if not person_inputs:
+                return
+
+            batch_input_tensor = torch.stack(person_inputs).to(DEVICE)
+            with torch.no_grad():
+                _, batch_hoe_output = self.mebow_model(batch_input_tensor)
+
+            for i, hoe_output in enumerate(batch_hoe_output):
+                x1, y1, x2, y2 = valid_boxes[i]
+                mask_pred = valid_masks[i]
+
+                pred_idx = torch.argmax(hoe_output)
+                angle_pred = pred_idx.item() * 5
+                direction = quantize_angle(angle_pred)
+                if self.invert_orientation:
+                    direction = "front" if direction == "back" else "back"
+                col = COLOR[direction]
+
+                # セグメンテーション画像に色を塗る（透過なし）
+                if mask_pred.shape[:2] != (h, w):
+                    mask_pred = cv2.resize(mask_pred, (w, h), interpolation=cv2.INTER_NEAREST)
+                segmentation[mask_pred == 1] = col
+
+            # ダウンサイズして配信
+            try:
+                resized = cv2.resize(segmentation, self.target_size, interpolation=cv2.INTER_AREA)
+                msg_seg = self.bridge.cv2_to_imgmsg(resized, encoding="bgr8")
+                msg_seg.header = msg.header
+                self.pub_segmentation.publish(msg_seg)
+            except Exception as e:
+                self.get_logger().error(f"セグメンテーション画像の配信に失敗: {e}")
         except Exception as e:
-            self.get_logger().error(f"YOLO推論に失敗: {e}")
+            self.get_logger().error(f"画像処理中に予期しない例外: {e}")
+        finally:
             self.processing = False
-            return
-
-        if seg_res.boxes is None or seg_res.masks is None:
-            self.processing = False
-            return
-
-        b_seg = seg_res.boxes.xyxy.cpu().numpy()
-        masks = seg_res.masks.data.byte().cpu().numpy()
-        if masks.size == 0:
-            self.processing = False
-            return
-
-        # 完全セグメンテーション画像を作成（人以外の領域はシアン）
-        segmentation = np.full_like(frame, BACKGROUND_COLOR)
-
-        person_inputs = []
-        valid_masks = []
-        valid_boxes = []
-        for bs, mask_pred in zip(b_seg, masks):
-            x1, y1, x2, y2 = map(int, bs)
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
-            if x1 >= x2 or y1 >= y2:
-                continue
-            person_img = frame_rgb[y1:y2, x1:x2]
-            person_img_resized = cv2.resize(person_img, self.mebow_input_size, interpolation=cv2.INTER_LINEAR)
-            person_inputs.append(mebow_transform(person_img_resized))
-            valid_masks.append(mask_pred)
-            valid_boxes.append((x1, y1, x2, y2))
-
-        if not person_inputs:
-            self.processing = False
-            return
-
-        batch_input_tensor = torch.stack(person_inputs).to(DEVICE)
-        with torch.no_grad():
-            _, batch_hoe_output = self.mebow_model(batch_input_tensor)
-
-        for i, hoe_output in enumerate(batch_hoe_output):
-            x1, y1, x2, y2 = valid_boxes[i]
-            mask_pred = valid_masks[i]
-
-            pred_idx = torch.argmax(hoe_output)
-            angle_pred = pred_idx.item() * 5
-            direction = quantize_angle(angle_pred)
-            col = COLOR[direction]
-
-            # セグメンテーション画像に色を塗る（透過なし）
-            mask_resized = cv2.resize(mask_pred, (w, h), interpolation=cv2.INTER_NEAREST)
-            segmentation[mask_resized == 1] = col
-
-        # ダウンサイズして配信
-        try:
-            resized = cv2.resize(segmentation, self.target_size, interpolation=cv2.INTER_AREA)
-            msg_seg = self.bridge.cv2_to_imgmsg(resized, encoding="bgr8")
-            msg_seg.header = msg.header
-            self.pub_segmentation.publish(msg_seg)
-        except Exception as e:
-            self.get_logger().error(f"セグメンテーション画像の配信に失敗: {e}")
-
-        self.processing = False
 
 
 def main(args=None):
