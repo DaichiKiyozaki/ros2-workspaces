@@ -1,0 +1,2 @@
+recursive-include ped_orient_pkg/MEBOW *
+include ped_orient_pkg/*.pt

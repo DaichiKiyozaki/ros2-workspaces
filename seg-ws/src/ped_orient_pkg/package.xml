@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ped_orient_pkg</name>
+  <version>0.0.1</version>
+  <description>YOLOv8-seg + MEBOW pedestrian orientation node.</description>
+  <maintainer email="user@example.com">daichi-kiyozaki</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  
+  <!-- Python dependencies -->
+  <exec_depend>python3-torch</exec_depend>
+  <exec_depend>python3-torchvision</exec_depend>
+  <exec_depend>python3-ultralytics</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
