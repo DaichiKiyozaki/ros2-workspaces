@@ -22,10 +22,19 @@
 **/map/*
 
 # for Python
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
-venv/*
+**/venv/
+**/.venv/
 
 # OpenAI Gym
 videos/*
+
+# MEBOW
+*/MEBOW/*
+
+# models
+*.pth
+*.pt
+*.onnx
