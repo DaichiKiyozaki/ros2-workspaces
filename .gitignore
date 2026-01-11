@@ -38,3 +38,6 @@ videos/*
 *.pth
 *.pt
 *.onnx
+
+# vscode
+.vscode/
