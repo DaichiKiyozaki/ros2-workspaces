@@ -44,6 +44,11 @@ def generate_launch_description():
                 "odom_frame_id": odom_frame_id,      # odom
                 "base_frame_id": base_frame_id,      # base_link
                 "scan_topic": scan_topic,            # /scan
+                "update_min_d": 0.1,                 # 移動距離の閾値を下げて更新頻度を上げる
+                "update_min_a": 0.1,                 # 回転角の閾値を下げて更新頻度を上げる
+                "transform_tolerance": 0.1,          # tf変換の許容時間
+                "min_particles": 500,
+                "max_particles": 2000,
             }
         ],
     )
