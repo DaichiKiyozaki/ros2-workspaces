@@ -20,11 +20,13 @@ setup(
         'numpy>=1.21.0,<2.0.0',
         'segmentation-models-pytorch==0.3.3',
         'albumentations>=1.3.0',
+        'ultralytics==8.4.8',
+        'ultralytics-thop==2.0.18',
     ],
     zip_safe=True,
     maintainer='daichi-kiyozaki',
     maintainer_email='kiyodai02@yahoo.co.jp',
-    description='TODO: Package description',
+    description='ROS2 node for pedestrian and drivable area segmentation using YOLO and semantic segmentation models',
     license='Apache-2.0',
     extras_require={
         'test': [

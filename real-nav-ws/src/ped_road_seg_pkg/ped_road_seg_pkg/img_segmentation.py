@@ -147,6 +147,15 @@ class ImgSegmentationNode(Node):
 
             pr_mask_np = pr_mask_tensor.squeeze().cpu().numpy()
             drivable_mask = (pr_mask_np > 0.5).astype(np.uint8)  # ２値化
+
+            # PadIfNeeded により推論サイズが拡張された場合は元の解像度に戻す
+            if drivable_mask.shape[:2] != (h, w):
+                pad_h = drivable_mask.shape[0] - h
+                pad_w = drivable_mask.shape[1] - w
+                # 既定の center padding を前提に中央を切り出す
+                start_y = max(0, pad_h // 2)
+                start_x = max(0, pad_w // 2)
+                drivable_mask = drivable_mask[start_y:start_y + h, start_x:start_x + w]
         except Exception as e:
             self.get_logger().error(f"Drivable area segmentation failed: {e}")
             return
@@ -187,7 +196,7 @@ class ImgSegmentationNode(Node):
         # === 3. 四値化画像作成 ===
         segmentation = self.segmentation_buffer
 
-        # 色定義
+        # 色定義(BGR)
         road_color = (0, 255, 0)          # 緑（走行可能領域）
         same_dir_color = (255, 0, 0)      # 青（同方向歩行者）
         ops_dir_color = (0, 0, 255)       # 赤（同方向以外歩行者）
