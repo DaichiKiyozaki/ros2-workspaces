@@ -16,13 +16,6 @@ from rclpy.qos import qos_profile_sensor_data
 
 
 class AgentNode(Node):
-    # Constants
-    IMG_WIDTH = 112
-    IMG_HEIGHT = 84
-    VEC_OBS_DIM = 2  # [Angle to destination (degree), Distance (m)]
-    MODEL_FILE_NAME = 'balance.onnx'
-    STACK_SIZE = 5   # Number of consecutive frames to stack
-
     def __init__(self):
         super().__init__('agent_node')
 
@@ -42,14 +35,33 @@ class AgentNode(Node):
         self._last_goal_log_time = self.get_clock().now()
         self._last_amcl_log_time = self.get_clock().now()
 
-        # 画像スタック用バッファ
-        self.frame_buffer = deque(maxlen=self.STACK_SIZE)
-
-        # デバッグ/監視用パラメータ
+        # parameters
         self.declare_parameter('debug', True)
         self.declare_parameter('log_period_sec', 1.0)
-        self.debug = self.get_parameter('debug').value
+        # モデル関連
+        self.declare_parameter('model_file_name', 'balance.onnx')
+        self.declare_parameter('img_width', 112)
+        self.declare_parameter('img_height', 84)
+        self.declare_parameter('stack_size', 5)
+        # ベクトル観測の要素数（[angle_deg, distance_m] を基本に不足は 0 埋め、超過は切り捨て）
+        self.declare_parameter('vec_obs_dim', 2)
+
+        self.debug = bool(self.get_parameter('debug').value)
         self.log_period_sec = float(self.get_parameter('log_period_sec').value)
+        self.img_width = int(self.get_parameter('img_width').value)
+        self.img_height = int(self.get_parameter('img_height').value)
+        self.stack_size = int(self.get_parameter('stack_size').value)
+        self.vec_obs_dim = int(self.get_parameter('vec_obs_dim').value)
+
+        if self.img_width <= 0 or self.img_height <= 0:
+            raise ValueError(f"img_width/img_height must be > 0: ({self.img_width}, {self.img_height})")
+        if self.stack_size <= 0:
+            raise ValueError(f"stack_size must be > 0: {self.stack_size}")
+        if self.vec_obs_dim <= 0:
+            raise ValueError(f"vec_obs_dim must be > 0: {self.vec_obs_dim}")
+
+        # 画像フレームバッファ（deque）
+        self.frame_buffer = deque(maxlen=self.stack_size)
         self._infer_count = 0
         self._last_log_time = self.get_clock().now()
 
@@ -73,7 +85,10 @@ class AgentNode(Node):
 
         # モデル読み込み
         share_dir = get_package_share_directory('model_in_ros2node_pkg')
-        model_path = os.path.join(share_dir, 'models', self.MODEL_FILE_NAME)
+        model_file_name = str(self.get_parameter('model_file_name').value or '').strip()
+        if not model_file_name:
+            model_file_name = 'balance.onnx'
+        model_path = os.path.join(share_dir, 'models', model_file_name)
         self.session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
 
         # ONNX 入出力情報をログ出力
@@ -89,11 +104,16 @@ class AgentNode(Node):
         self.get_logger().info(f"ONNX outputs: {list(zip(self.output_names, self.output_shapes))}")
 
         # アクション出力は起動時に1回だけ決定（推論時は固定参照）
-        # deterministic_continuous_actions: 分布の平均値（同じ出力に対して同じ出力）
-        # continuous_actions: 連続値アクション(確率分布)
-        preferred = ['deterministic_continuous_actions', 'continuous_actions']
+        # continuous_actions: 連続値アクション（確率分布）
+        # deterministic_continuous_actions: 分布の平均値（同じ入力に対して同じ出力）
+        preferred = ['continuous_actions', 'deterministic_continuous_actions']
         param_action = str(self.get_parameter('action_output_name').value or "").strip()
         if param_action:
+            if 'discrete' in param_action:
+                raise RuntimeError(
+                    "discrete action outputs are not supported. "
+                    f"requested action_output_name='{param_action}'"
+                )
             if param_action not in self.output_names:
                 raise RuntimeError(
                     f"action_output_name='{param_action}' is not in model outputs. available_outputs={self.output_names}"
@@ -105,6 +125,12 @@ class AgentNode(Node):
                 raise RuntimeError(
                     f"action output not found. preferred={preferred}, available_outputs={self.output_names}"
                 )
+
+        if 'discrete' in self.action_output_name:
+            raise RuntimeError(
+                "discrete action outputs are not supported. "
+                f"selected action_output_name='{self.action_output_name}', available_outputs={self.output_names}"
+            )
         self.get_logger().info(
             f"action_output_name={self.action_output_name}, available_outputs={self.output_names}"
         )
@@ -185,12 +211,13 @@ class AgentNode(Node):
 
     def compute_goal_vector(self) -> np.ndarray:
         """
-        Unity学習時と同じ (1,2) ベクトル観測 [方向(deg), 距離d] を返す
+        Unity学習時と同じ (1,2) ベクトル観測 [方向(deg), 距離d] を基準に返す
         方向は yaw - goal_heading を [-pi, pi] に正規化し deg へ変換する
         ゴールまたは自己位置が未取得なら 0 埋めで返す
+        vec_obs_dim に合わせて 0 埋め/切り捨てを行う
         """
         if self.goal_xy is None or self.robot_xyyaw is None:
-            return np.zeros((1, self.VEC_OBS_DIM), dtype=np.float32)
+            return np.zeros((1, self.vec_obs_dim), dtype=np.float32)
 
         goal_x, goal_y = float(self.goal_xy[0]), float(self.goal_xy[1])
         rx, ry, yaw = float(self.robot_xyyaw[0]), float(self.robot_xyyaw[1]), float(self.robot_xyyaw[2])
@@ -205,7 +232,12 @@ class AgentNode(Node):
         signed_rad = self.wrap_to_pi(goal_heading - yaw)
         signed_deg = self.wrap_to_180_deg(math.degrees(signed_rad))
 
-        return np.array([[signed_deg, d]], dtype=np.float32)
+        base = np.array([[signed_deg, d]], dtype=np.float32)
+        if self.vec_obs_dim == 2:
+            return base
+        if self.vec_obs_dim < 2:
+            return base[:, : self.vec_obs_dim]
+        return np.pad(base, ((0, 0), (0, self.vec_obs_dim - 2)), constant_values=0.0)
 
     # ----------------------------
     # カメラコールバック：推論処理
@@ -219,7 +251,7 @@ class AgentNode(Node):
             return
 
         # 学習時解像度へリサイズ
-        img_rgb = cv2.resize(img_rgb, (self.IMG_WIDTH, self.IMG_HEIGHT), interpolation=cv2.INTER_AREA)
+        img_rgb = cv2.resize(img_rgb, (self.img_width, self.img_height), interpolation=cv2.INTER_AREA)
 
         # [0,1] 正規化
         img_f = img_rgb.astype(np.float32) / 255.0  # (H,W,3)
@@ -230,7 +262,7 @@ class AgentNode(Node):
         # スタック用バッファへ投入
         if len(self.frame_buffer) == 0:
             # 初回は同一フレームで埋める
-            for _ in range(self.STACK_SIZE):
+            for _ in range(self.stack_size):
                 self.frame_buffer.append(img_chw)
         else:
             self.frame_buffer.append(img_chw)
@@ -282,7 +314,7 @@ class AgentNode(Node):
                 # 画像入力：NCHW か NHWC を簡易判定
                 # NCHW: (1, C, H, W), NHWC: (1, H, W, C)
                 ch_dim1 = shape[1]
-                if isinstance(ch_dim1, int) and (ch_dim1 == 3 or ch_dim1 == 3 * self.STACK_SIZE):
+                if isinstance(ch_dim1, int) and (ch_dim1 == 3 or ch_dim1 == 3 * self.stack_size):
                     feed[name] = img_nchw
                 else:
                     feed[name] = img_nhwc

@@ -16,13 +16,18 @@
    - rviz設定ファイル
       - 配置先： `unity-nav-ws/src/model_in_ros2node_pkg/rviz`
 
-2. ワークスペースのビルド
+2. 行動モデル (ONNX) を追加
+   - 配置先： `unity-nav-ws/src/model_in_ros2node_pkg/models`
+   - 例: `unity-nav-ws/src/model_in_ros2node_pkg/models/balance.onnx`
+   - `agent_node` は `share/model_in_ros2node_pkg/models` から読み込むため、配置後にビルドが必要
+
+3. ワークスペースのビルド
    ```bash
    cd ~/ros2-workspaces/unity-nav-ws
    colcon build --symlink-install
    ```
 
-3. オーバーレイ
+4. オーバーレイ
    ```bash
    source install/setup.bash
    ```
@@ -60,12 +65,21 @@ ros2 launch model_in_ros2node_pkg unity_amcl.launch.py
 ros2 run model_in_ros2node_pkg agent_node
 ```
 
+モデルに応じた主な起動パラメータ例:
+
+```bash
+ros2 run model_in_ros2node_pkg agent_node --ros-args \
+   -p model_file_name:=balance.onnx \
+   -p stack_size:=5 \
+   -p action_output_name:=continuous_actions
+```
+
 ### 通信仕様 (ROS Topics)
 
 #### Subscribed Topics (入力)
 | トピック名 | 型 | 説明 |
 | --- | --- | --- |
-| `/unity/camera/image_raw` | `sensor_msgs/Image` | エージェントの視覚情報 (RGB)。ノード内で **112x84** にリサイズ。 |
+| `/unity/camera/image_raw` | `sensor_msgs/Image` | エージェントの視覚情報 (RGB)。ノード内で `img_width` x `img_height` にリサイズ（デフォルト: 112x84）。 |
 | `/goal_pose` | `geometry_msgs/PoseStamped` | RViz2 の 2D Nav Goal。ゴール位置として使用。 |
 | `/amcl_pose` | `geometry_msgs/PoseWithCovarianceStamped` | AMCL 推定の自己位置。ゴール相対角の計算に使用。 |
 
@@ -85,5 +99,11 @@ Unity 側は `ros2-for-unity` を使用し、以下を publish 対象とする�
 ## パラメータ
 | 名前 | デフォルト | 説明 |
 | --- | --- | --- |
+| `model_file_name` | `balance.onnx` | `share/model_in_ros2node_pkg/models` 配下から読み込む ONNX ファイル名。モデル差し替え時に指定。 |
+| `action_output_name` | `""` | アクション出力に使う ONNX output 名。空の場合は `continuous_actions` → `deterministic_continuous_actions` の順で自動選択。※discrete系outputは未対応。 |
+| `img_width` | `112` | 入力画像のリサイズ幅。モデルの入力形状に合わせる必要がある。 |
+| `img_height` | `84` | 入力画像のリサイズ高さ。モデルの入力形状に合わせる必要がある。 |
+| `stack_size` | `5` | 連続フレームのスタック数。入力が NCHW の場合はチャネル数が `3*stack_size` になるため、モデルに合わせて設定する。 |
+| `vec_obs_dim` | `2` | ベクトル観測の次元数。基本は `[angle_deg, distance_m]`（2次元）で、不足は 0 埋め・超過は切り捨て。モデルの入力形状に合わせて設定する。 |
 | `debug` | `true` | デバッグログと `/debug/stacked_image` の publish を有効化。 |
 | `log_period_sec` | `1.0` | デバッグログの周期 (秒)。 |
