@@ -9,6 +9,18 @@
 - カメラ画像から「走行可能領域（床）」と「歩行者（同方向/同方向以外）」を検出し、4値化セグメンテーション画像を出力する。
 - 学習環境を4値化し、実環境でも本パッケージで4値化した画像を行動モデルに入力することで、sim2realの視覚ギャップを軽減する。
 
+使用モデル：
+
+- セマンティックセグメンテーション（走行可能領域）
+  - 画像をピクセル単位で分類し、走行可能領域（床）マスクを推定する。
+  - 実装上は PyTorch のセマンティックセグメンテーションモデル（`best_model_house2.pth`）で床マスクを生成する。
+- YOLO-seg（歩行者 + 向きカテゴリ）
+  - [yolo26s-seg](https://docs.ultralytics.com/ja/models/yolo26/)ベースでファインチューニングした2クラスのインスタンスセグメンテーションモデル（`yolo26s-seg_pedflow2cls.pt`）。
+  - 歩行者領域を検出し、ピクセル単位のマスクを推定する。
+  - クラス定義（実装の `class 0/1`）
+    - class 0: 同方向歩行者（カメラとの相対角度が 45° 以内）
+    - class 1: 同方向以外歩行者
+
 出力（`/gb_img`）の色（BGR）は以下。
 
 | クラス | 色(BGR) |
@@ -20,11 +32,9 @@
 
 ### 開発環境
 
-- ROS2
-  - 開発環境：jazzy
-- Python
-  - 開発環境：Python 3.12.3
-- CUDA推奨
+- ROS2 jazzy
+- Python 3.12.3
+- CUDA Version: 13.0   
 - Python依存は [src/ped_road_seg_pkg/requirements.txt](src/ped_road_seg_pkg/requirements.txt) を参照
 
 モデルファイル（要配置）：
@@ -39,7 +49,7 @@
 #### 1) セットアップ & ビルド
 
 ```bash
-cd /home/daichi-kiyozaki/ros2-workspaces/real-nav-ws
+cd ~/ros2-workspaces/real-nav-ws
 
 python3 -m venv .venv --system-site-packages
 source .venv/bin/activate
@@ -66,7 +76,7 @@ ros2 run v4l2_camera v4l2_camera_node \
 セグメンテーション：
 
 ```bash
-cd /home/daichi-kiyozaki/ros2-workspaces/real-nav-ws
+cd ~/ros2-workspaces/real-nav-ws
 source .venv/bin/activate
 source install/setup.bash
 ros2 run ped_road_seg_pkg img_segmentation_node
